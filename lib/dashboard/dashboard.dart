@@ -1,8 +1,10 @@
 //lib/dashboard/dashboard.dart
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:my_app/dashboard/widgets/expiring_today_section.dart';
 import 'package:my_app/dashboard/widgets/inventory_summary_section.dart';
@@ -144,28 +146,44 @@ class _DashboardTabState extends State<DashboardTab>
 
       final ai = EnhancedAIRecommendationService();
       final prompt = [
-        'คุณคือ Smart Insight ที่ช่วยสรุปแดชบอร์ดจัดการครัว พูดภาษาไทย กระชับ เป็นกันเอง และอ้างอิงข้อมูลจริงเท่านั้น',
-        'ภารกิจ: วิเคราะห์แต่ละหัวข้อหลักของแดชบอร์ด แล้วให้ข้อสังเกต หรือคำแนะนำสั้น ๆ 1-2 ประโยคต่อหัวข้อ',
-        'ตอบเป็น JSON รูปแบบ {"insights":[{"section":"expiring_today","title":"หัวข้อ","message":"ข้อความ"}]}',
-        'เพิ่มอินไซต์สรุปรวมของแดชบอร์ดใน section "summary" เสมอ',
-        'ระบุ section ให้ตรงกับคีย์ที่ให้มาเท่านั้น: summary, expiring_today, weekly_cooking, top_ingredients, use_before_expiry, top_menus, daily_nutrition, inventory_summary',
-        'ห้ามแต่งข้อมูลเพิ่ม หากไม่มีข้อมูลให้สื่อสารอย่างสุภาพว่าไม่มีข้อมูล',
-        'หลีกเลี่ยงการใช้ bullet หรือการฟอร์แมตพิเศษ',
+        'คุณคือผู้ช่วยวางแผนอาหารที่ต้องสร้าง Smart Insight ภาษาไทยจากข้อมูล JSON ด้านล่าง',
+        'เน้นประเด็นที่มีผลต่อการจัดการวัตถุดิบและโภชนาการในช่วง 7 วัน',
+        'ตอบกลับเป็น JSON เท่านั้นในรูป {"insights":[{"section":"expiring_today","title":"หัวข้อ","message":"รายละเอียด"}]}',
+        'ห้ามเพิ่มฟิลด์อื่นนอกจาก insights และห้ามสร้าง section "summary"',
+        'section ที่อนุญาต: expiring_today, weekly_cooking, top_ingredients, use_before_expiry, top_menus, daily_nutrition, inventory_summary',
+        'section daily_nutrition ต้องมีข้อความอย่างน้อย 1 รายการ และให้คำแนะนำที่ลงมือทำได้',
+        'ใช้ภาษากระชับ ไม่เกิน 3 ประโยคต่อข้อความ และใช้ bullet เมื่อจำเป็นเท่านั้น',
+        'เลี่ยงการแนะนำเมนูที่มีวัตถุดิบหมดสต็อกหรือหมดอายุแล้ว',
         'ข้อมูล:',
         jsonEncode(context),
       ].join('\n');
 
       final txt = await ai.generateTextSmart(prompt);
+      if (txt == null || txt.trim().isEmpty) {
+        return fallback;
+      }
+
       await ApiUsageService.countGemini();
+      if (kDebugMode) {
+        print(
+          '[INSIGHT] rawResponse=${txt.substring(0, math.min(400, txt.length))}',
+        );
+      }
       final parsed = _parseInsightResponse(txt);
       if (parsed.isNotEmpty) {
         return parsed;
       }
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('Smart insight generation failed: ');
+      if (kDebugMode) {
+        debugPrint(st.toString());
+      }
       try {
         await ApiUsageService.setGeminiCooldown(const Duration(seconds: 20));
       } catch (_) {}
     }
+
+
 
     return fallback;
   }
@@ -977,7 +995,9 @@ class _DashboardTabState extends State<DashboardTab>
       }).length;
 
       var expiringTodayItems = inventoryItems
-          .where((it) => (it.daysLeft ?? -1) == 0)
+          .where(
+            (it) => (it.daysLeft ?? -1) == 0 && it.quantity > 0,
+          )
           .toList(growable: false);
       if (expiringTodayItems.length > 10) {
         expiringTodayItems = expiringTodayItems.take(10).toList();
@@ -2150,10 +2170,47 @@ class _DashboardTabState extends State<DashboardTab>
       for (int i = 0; i < adviceMessages.length; i++)
         _DashboardInsightEntry(
           section: 'daily_nutrition',
-          title: i == 0 ? 'แนะนำโภชนาการวันนี้' : '',
+          title: i == 0 ? '�й�����ҡ���ѹ���' : '',
           message: adviceMessages[i],
         ),
     ];
+
+    const double tileSpacing = 12.0;
+    const double minTileWidth = 140.0;
+    const double headerHeight = 68.0;
+
+    Map<String, double> resolveLayout(double width, int count) {
+      if (count <= 0) {
+        return {
+          'tileWidth': math.max(minTileWidth, width),
+          'gridHeight': _NutritionStatTile.minHeight,
+        };
+      }
+      final effectiveWidth = math.max(minTileWidth, width);
+      final rawColumns =
+          (effectiveWidth / (minTileWidth + tileSpacing)).floor();
+      var columns = rawColumns.clamp(1, 3);
+      columns = math.max(1, math.min(columns, count));
+      final usableWidth = math.max(minTileWidth, effectiveWidth);
+      final tileWidth =
+          (usableWidth - tileSpacing * (columns - 1)) / columns;
+      final rows = math.max(1, ((count + columns - 1) ~/ columns));
+      final gridHeight =
+          rows * _NutritionStatTile.minHeight +
+          math.max(0, rows - 1) * tileSpacing;
+      return {
+        'tileWidth': tileWidth,
+        'gridHeight': gridHeight,
+      };
+    }
+
+    double viewportFraction(double width) {
+      if (width < 360) return 0.98;
+      if (width < 480) return 0.9;
+      if (width < 720) return 0.85;
+      return 0.8;
+    }
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -2165,7 +2222,7 @@ class _DashboardTabState extends State<DashboardTab>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'โภชนาการต่อวัน (7 วันล่าสุด)',
+            '����ҡ�õ���ѹ (7 �ѹ����ش)',
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w800,
@@ -2175,84 +2232,112 @@ class _DashboardTabState extends State<DashboardTab>
           const SizedBox(height: 12),
           if (entries.isEmpty)
             Text(
-              'ยังไม่มีข้อมูลโภชนาการในช่วงนี้',
+              '�ѧ����բ���������ҡ��㹪�ǧ���',
               style: TextStyle(color: cs.onSurface.withAlpha(170)),
             )
           else
-            SizedBox(
-              height: 400,
-              child: PageView.builder(
-                controller: PageController(viewportFraction: 0.8),
-                itemCount: entries.length,
-                itemBuilder: (context, index) {
-                  final item = entries[index];
-                  final totals = item.totals;
-                  final statTiles = <Widget>[
-                    _NutritionStatTile(
-                      emoji: '⚡',
-                      label: 'พลังงาน',
-                      value: '${totals.calories.toStringAsFixed(0)} kcal',
-                      color: Colors.amber.shade400,
-                    ),
-                    _NutritionStatTile(
-                      emoji: '🥚',
-                      label: 'โปรตีน',
-                      value: '${totals.protein.toStringAsFixed(1)} g',
-                      color: Colors.orangeAccent.shade200,
-                    ),
-                    _NutritionStatTile(
-                      emoji: '🍚',
-                      label: 'คาร์บ',
-                      value: '${totals.carbs.toStringAsFixed(1)} g',
-                      color: Colors.lightBlueAccent.shade200,
-                    ),
-                    _NutritionStatTile(
-                      emoji: '🥑',
-                      label: 'ไขมัน',
-                      value: '${totals.fat.toStringAsFixed(1)} g',
-                      color: Colors.tealAccent.shade200,
-                    ),
-                    _NutritionStatTile(
-                      emoji: '🥦',
-                      label: 'ไฟเบอร์',
-                      value: '${totals.fiber.toStringAsFixed(1)} g',
-                      color: Colors.greenAccent.shade200,
-                    ),
-                    _NutritionStatTile(
-                      emoji: '🧂',
-                      label: 'โซเดียม',
-                      value: '${totals.sodium.toStringAsFixed(0)} mg',
-                      color: Colors.purpleAccent.shade200,
-                    ),
-                  ];
-                  return Padding(
-                    padding: EdgeInsets.only(
-                      right: index == entries.length - 1 ? 0 : 12,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _formatThaiShortDate(item.date),
-                          style: TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 16,
-                            color: cs.onSurface,
-                          ),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final fraction = viewportFraction(constraints.maxWidth);
+                final controller = PageController(viewportFraction: fraction);
+                const sampleTileCount = 6;
+                final sampleLayout = resolveLayout(
+                  constraints.maxWidth * fraction,
+                  sampleTileCount,
+                );
+                final pageHeight = sampleLayout['gridHeight']! + headerHeight;
+
+                return SizedBox(
+                  height: pageHeight,
+                  child: PageView.builder(
+                    controller: controller,
+                    itemCount: entries.length,
+                    itemBuilder: (context, index) {
+                      final item = entries[index];
+                      final totals = item.totals;
+                      final statTiles = <Widget>[
+                        _NutritionStatTile(
+                          emoji: '?',
+                          label: '��ѧ�ҹ',
+                          value: ' kcal',
+                          color: Colors.amber.shade400,
                         ),
-                        const SizedBox(height: 12),
-                        Expanded(
-                          child: Wrap(
-                            spacing: 12,
-                            runSpacing: 12,
-                            children: statTiles,
-                          ),
+                        _NutritionStatTile(
+                          emoji: '??',
+                          label: '�õչ',
+                          value: ' g',
+                          color: Colors.orangeAccent.shade200,
                         ),
-                      ],
-                    ),
-                  );
-                },
-              ),
+                        _NutritionStatTile(
+                          emoji: '??',
+                          label: '����',
+                          value: ' g',
+                          color: Colors.lightBlueAccent.shade200,
+                        ),
+                        _NutritionStatTile(
+                          emoji: '??',
+                          label: '��ѹ',
+                          value: ' g',
+                          color: Colors.tealAccent.shade200,
+                        ),
+                        _NutritionStatTile(
+                          emoji: '??',
+                          label: '�����',
+                          value: ' g',
+                          color: Colors.greenAccent.shade200,
+                        ),
+                        _NutritionStatTile(
+                          emoji: '??',
+                          label: '�����',
+                          value: ' mg',
+                          color: Colors.purpleAccent.shade200,
+                        ),
+                      ];
+
+                      return LayoutBuilder(
+                        builder: (context, pageConstraints) {
+                          final layout = resolveLayout(
+                            pageConstraints.maxWidth,
+                            statTiles.length,
+                          );
+                          final tileWidth = layout['tileWidth']!;
+                          final gridHeight = layout['gridHeight']!;
+
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _formatThaiShortDate(item.date),
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 16,
+                                  color: cs.onSurface,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                height: gridHeight,
+                                child: Wrap(
+                                  spacing: tileSpacing,
+                                  runSpacing: tileSpacing,
+                                  children: statTiles
+                                      .map(
+                                        (tile) => SizedBox(
+                                          width: tileWidth,
+                                          child: tile,
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      );
+                    },
+                  ),
+                );
+              },
             ),
           if (combinedInsights.isNotEmpty) ...[
             const SizedBox(height: 12),
@@ -2269,6 +2354,7 @@ class _DashboardTabState extends State<DashboardTab>
       ),
     );
   }
+
 
   // === ส่วนหลัก: การ์ด KPI + Subtitle ===
   Widget _buildInsightKPISection(
@@ -2614,7 +2700,6 @@ class _DashboardTabState extends State<DashboardTab>
                       width: MediaQuery.of(context).size.width * 0.78,
                       child: RecipeCard(
                         recipe: r,
-                        showSourceBadge: true,
                         compact: true,
                         onTap: () => _openRecipeDetail(context, r),
                       ),
@@ -3439,6 +3524,8 @@ class _NutritionStatTile extends StatelessWidget {
     required this.color,
   });
 
+  static const double minHeight = 96.0;
+
   final String emoji;
   final String label;
   final String value;
@@ -3448,40 +3535,39 @@ class _NutritionStatTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final background = color.withOpacity(0.18);
-    final borderColor = color.withOpacity(0.4);
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 120, maxWidth: 140),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: background,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: borderColor),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(emoji, style: const TextStyle(fontSize: 20)),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: cs.onSurface,
-              ),
+    final borderColor = color.withOpacity(0.35);
+    return Container(
+      constraints: const BoxConstraints(minHeight: minHeight),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: borderColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(emoji, style: const TextStyle(fontSize: 20)),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: cs.onSurface,
             ),
-            const SizedBox(height: 4),
-            Text(
-              value,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: cs.onSurface.withAlpha(200),
-              ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: cs.onSurface.withAlpha(200),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
